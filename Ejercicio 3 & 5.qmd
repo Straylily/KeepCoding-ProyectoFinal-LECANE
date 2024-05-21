@@ -1,0 +1,1105 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+## Introducción
+
+En este punto queremos realizar un análisis exploratorio, es decir, explorar los datos obtenidos para la extracción de conclusiones sobre los mismos mediante gráficos y estimadores estadísticos. 
+
+Este estudio estadístico lo llevaremos a cabo en R.
+
+## Carga de datos
+
+Cargamos el dataset 'air-bnb-listings.csv' descargado para el proyecto.
+
+```{r}
+if (!requireNamespace("caret", quietly = TRUE)) install.packages("caret")
+if (!requireNamespace("glmnet", quietly = TRUE)) install.packages("glmnet")
+if (!requireNamespace("car", quietly = TRUE)) install.packages("car")
+if (!requireNamespace("car", quietly = TRUE)) install.packages("ggplot2")
+if (!requireNamespace("car", quietly = TRUE)) install.packages("reshape2")
+library (car)
+library(tidyverse)
+library(caret)
+library(ggplot2)
+#library(reshape2)
+library(glmnet)
+data <- read.csv('air-bnb-listings.csv', stringsAsFactors = T, sep = ";")
+```
+
+## Paso 1: Optimizacion de datos
+
+Primeramente se ha realizado una revisión de los datos cargados para optimizar el conjunto, descartando información redundante, verificando los formatos numéricos, de fechas y coordenadas geográficas, separando los campos necesarios y normalizando los valores.
+
+```{r}
+# Extraemos los datos correspondientes únicamente a la ciudad de Madrid. 
+df <- data[data$City == "Madrid",]
+```
+
+```{r}
+# Elimino las columnas con valores que no aportan información:
+# Eliminamos la columna Name -> No aporta información relevante al análisi. Cada anuncio se puede identificar con el campo Room.ID
+# Eliminamos la columna Updated.Date -> Para el dataset actual, contiene la misma información para todas las filas. 
+# Eliminamos la columna Location -> Información redundante, ya reflejada en las columnas Country, City y Neighbourhood. 
+
+df <- select(df, -Name, -Updated.Date, -Location)
+    #paste(df$City[df$City != "Madrid"])
+
+#Eliminamos las columnas Country y City -> Es información redundante dado que hemos extraído la información para una ciudad concreta: Madrid.
+df <- select(df, -City, -Country)
+
+# Convertimos el campo Date.last.review a formato fecha
+df$Date.last.review <- as.Date(df$Date.last.review)
+
+#Separamos la columna Coordinates en dos columnas Latitud y Longitud, y convertimos a formato numérico
+
+library(stringr)
+v <-str_split_fixed(df$Coordinates, ", ",2 )
+df <- mutate(df, Latitud = as.numeric(v[,1]), Longitud = as.numeric(v[,2]))
+df <- select (df, -Coordinates)
+
+#Echamos un vistazo rapido a los barrios reflejados en el dataset para identificar posibles duplicados.
+barrios <- sort(df$Neighbourhood)
+barrios <- unique(barrios)
+barrios
+#Están todos bien escritos, así que no es necesario realizar ninguna transformación
+```
+
+```{r}
+#Buscamos valores nulos
+missing_values <- colSums(is.na(df))
+print(missing_values)
+
+#Number.of.reviews.per.month, nulos = 0, porque si es NA es que no tiene reseñas
+
+df$Number.of.reviews.per.month[is.na(df$Number.of.reviews.per.month) ] <- 0
+
+#Date.last.review, los nulos hemos buscado la fecha anterior y hemos puesto una más anterior (31 del 12 de 2011) para ponerle una fecha y no tener nulos
+
+df$Date.last.review[is.na(df$Date.last.review) ] <- as.Date("2011-12-31")
+```
+
+```{r}
+missing_values <- colSums(is.na(df))
+print(missing_values)
+```
+
+## Paso 2: Seleccion de variables de interes
+
+Nos interesa estudiar lo siguiente: 
+
+-   Precio en funcion de barrio
+
+-   Precio en función del tipo de alojamiento
+
+-   Precio en función del número mínimo de noches
+
+-   Precio en función del número de reseñas
+
+-   Precio en función del número de reseñas mensuales
+
+-   Precio en función de la fecha de última reseña
+
+-   Precio en función del número de alojamientos alquilados por un mismo host
+
+-   Precio en función de la disponibilidad
+
+-   Precio en función de la distancia al centro de la ciudad (Sol)
+
+Para esto último hace falta calcular la distancia al centro de la ciudad en funcion de las coordenadas:
+
+```{r}
+# DISTANCIA ENTRE DOS PUNTOS GEOGRÁFIOS
+haversine <- function(lat1, lon1, lat2, lon2) {
+  # Convertir grados a radianes
+  lat1 <- lat1 * pi / 180
+  lon1 <- lon1 * pi / 180
+  lat2 <- lat2 * pi / 180
+  lon2 <- lon2 * pi / 180
+
+  #Radio de la Tierra en kilómetros
+  R <- 6371
+
+  #Calcular las diferencias de latitud y longitud
+  dLat <- lat2 - lat1
+  dLon <- lon2 - lon1
+
+  #Aplicar la fórmula de Haversine
+  a <- sin(dLat / 2)^2 + cos(lat1) * cos(lat2) * sin(dLon / 2)^2
+  c <- 2 * asin(sqrt(a))
+
+  #Calcular la distancia
+  distance <- R * c
+
+  return(distance)
+}
+
+
+# Calculamos la distancia en km al centro de la ciudad, tomado Sol como referencia
+x <- c(mean(df$Latitud[df$Neighbourhood == "Sol"]), mean(df$Longitud[df$Neighbourhood == "Sol"]))
+df <- mutate(df, Distancia = round(haversine(df$Latitud, df$Longitud, x[1], x[2]), 3))
+
+```
+
+```{r}
+df
+```
+
+## Paso 3: Estadisticas de variables
+
+```{r}
+#Observamos el summary de nuestros campos
+summary(df)
+
+#Valores sospechosos: Room.Price toma el valor 0 para alguno de los casos, Minimum.nights toma valores de más de 2 años para alguno de los casos
+```
+
+#### Estadisticas de Noches minimas
+
+```{r}
+paste("La media de noches minimas para reserva es", round(mean(df$Minimum.nights),digits = 3))
+paste("La media de noches minimas para reserva es, truncando al 0.2 es", round(mean(df$Minimum.nights, trim = 0.2), digits = 3))
+
+paste("La mediana de noches minimas para reserva es:", median(df$Minimum.nights))
+paste("La desviacion tipica de noches minimas para reserva es:", round(sd(df$Minimum.nights), digits = 3))
+paste("La varianza de noches mínimas para reserva es:", round(var(df$Minimum.nights), digits = 3))
+paste("El mínimo número de noches para reserva es:", min(df$Minimum.nights))
+paste("El máximo número de noches para reserva es:", max(df$Minimum.nights))
+
+
+#Outliers
+X <- df$Minimum.nights
+#boxplot(X)
+boxplot(X, ylim = c(0,20))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+
+#eliminar los outiliers, que consideramos que son los que tienen un valor superior a Q3+1,5*IQR
+
+Q3_nochesminimas <- quantile(df$Minimum.nights, 0.75, na.rm = TRUE)
+IQR_nochesminimas <- IQR(df$Minimum.nights, na.rm = TRUE)
+umbral_superior_nochesminimas <- Q3_nochesminimas + 1.5 * IQR_nochesminimas
+df_sin_outliers_nochesminimas <- df %>% filter(Minimum.nights <= umbral_superior_nochesminimas)
+
+#Outliers
+X <- df_sin_outliers_nochesminimas$Minimum.nights
+#boxplot(X)
+boxplot(X, ylim = c(-2,10))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+
+```
+
+#### Estadisticas de Distancia al Centro
+
+```{r}
+
+paste("La distancia media al centro de madrid es", round(mean(df$Distancia),digits = 3))
+paste("La distancia media al centro de madrid es, truncando al 0.2 es", round(mean(df$Distancia, trim = 0.2), digits = 3))
+
+paste("La mediana la distancia al centro de Madrid es:", median(df$Distancia))
+paste("La desviacion tipica la distancia al centro de Madrid es:", round(sd(df$Distancia),digits = 3))
+paste("La varianza de la distancia al centro de Madrid es:", round(var(df$Distancia),digits = 3))
+paste("El mínimo número de la distancia al centro de Madrid es:", min(df$Distancia))
+paste("El máximo número de la distancia al centro de Madrid es:", max(df$Distancia))
+
+
+
+#Outliers
+X <- df$Distancia
+boxplot(X)
+#boxplot(X, ylim = c(0,1000))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+
+#no quitamos los outliers
+```
+
+#### Estadisticas de Precios de alojamientos
+
+```{r}
+
+paste("La media Precios es", round(mean(df$Room.Price),digits = 3))
+paste("La media de precios es, truncando al 0.2 es", round(mean(df$Room.Price, trim = 0.2), digits = 3))
+paste("La mediana de los precios es:", median(df$Room.Price))
+paste("La desviacion tipica del precio es:", round(sd(df$Room.Price), digits = 3))
+paste("La varianza del precio es:", round(var(df$Room.Price), digits = 3))
+paste("El precio mínimo es:", min(df$Room.Price))
+paste("El precio máximo es:", max(df$Room.Price))
+
+
+
+#Outliers
+X <- df$Room.Price
+#boxplot(X)
+boxplot(X, ylim = c(1,300))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+
+#eliminar el que tiene precio 0 porque no tiene sentido y los outlier, considerando que son los que tienen un precio superior a Q3+1,5*IQR 
+
+Q3_precio <- quantile(df$Room.Price, 0.75, na.rm = TRUE)
+IQR_precio <- IQR(df$Room.Price, na.rm = TRUE)
+umbral_superior_precio <- Q3_precio + 1.5 * IQR_precio
+df_sin_outliers_precio <- df %>% filter(Room.Price > 0 & Room.Price <= umbral_superior_precio)
+
+X <- df_sin_outliers_precio$Room.Price
+boxplot(X)
+#boxplot(X, ylim = c(1,300))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+```
+
+```{r}
+df_sin_outliers_precioynoches <- df %>% filter(Room.Price > 0 & Room.Price <= umbral_superior_precio & Minimum.nights <= umbral_superior_nochesminimas)
+```
+
+#### Estadisticas de Número de reseñas
+
+```{r}
+paste("La media de reseñas es", round(mean(df$Number.of.reviews),digits = 3))
+paste("La media de reseñas es, truncando al 0.2 es", round(mean(df$Number.of.reviews, trim = 0.2), digits = 3))
+paste("La mediana de reseñas es:", median(df$Number.of.reviews))
+
+paste("La desviacion tipica de reseñas es:", sd(df$Number.of.reviews))
+paste("La varianza del número de reseñas es:", round(var(df$Number.of.reviews), digits = 3))
+paste("El número de reseñas mínimo es:", min(df$Number.of.reviews))
+paste("El número de reseñas máximo es:", max(df$Number.of.reviews))
+
+
+#Outliers
+X <- df$Number.of.reviews
+#boxplot(X)
+boxplot(X, ylim = c(0,150))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+
+#eliminar los outliers, considerando que son los que tienen un número de reseñas superior a Q3+1,5*IQR
+
+Q3_reseñas <- quantile(df$Number.of.reviews, 0.75, na.rm = TRUE)
+IQR_reseñas <- IQR(df$Number.of.reviews, na.rm = TRUE)
+umbral_superior_reseñas <- Q3_reseñas + 1.5 * IQR_reseñas
+df_sin_outliers_reseñas <- df %>% filter(Number.of.reviews <= umbral_superior_reseñas)
+
+X <- df_sin_outliers_reseñas$Number.of.reviews
+boxplot(X)
+#boxplot(X, ylim = c(1,300))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+```
+
+#### Estadisticas de Número de reseñas por mes
+
+```{r}
+#es similar a la anterior ya que es una variable que se saca a partir de la anterior
+
+paste("La media de reseñas mensuales es", round(mean(df$Number.of.reviews.per.month),digits = 3))
+paste("La media de reseñas mensuales es, truncando al 0.2 es", round(mean(df$Number.of.reviews.per.month, trim = 0.2), digits = 3))
+paste("La mediana de reseñas mensuales es:", median(df$Number.of.reviews.per.month))
+
+paste("La desviacion tipica de las reseñas mensuales es:", sd(df$Number.of.reviews.per.month))
+paste("La varianza del número de reseñas mensuales es:", round(var(df$Number.of.reviews.per.month), digits = 3))
+paste("El número de reseñas mensuales mínimo es:", min(df$Number.of.reviews.per.month))
+paste("El número de reseñas mensuales máximo es:", max(df$Number.of.reviews.per.month))
+
+
+#Outliers
+X <- df$Number.of.reviews.per.month
+#boxplot(X)
+boxplot(X, ylim = c(0,5))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outlayers")
+
+#eliminar los outliers, considerando que son los que tienen un número de reseñas mensuales superior a Q3+1,5*IQR
+
+Q3_reseñasmes <- quantile(df$Number.of.reviews.per.month, 0.75, na.rm = TRUE)
+IQR_reseñasmes <- IQR(df$Number.of.reviews.per.month, na.rm = TRUE)
+umbral_superior_reseñasmes <- Q3_reseñasmes + 1.5 * IQR_reseñasmes
+df_sin_outliers_reseñasmes <- df %>% filter(Number.of.reviews.per.month <= umbral_superior_reseñasmes)
+
+X <- df_sin_outliers_reseñasmes$Number.of.reviews.per.month
+boxplot(X)
+#boxplot(X, ylim = c(1,300))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+```
+
+#### Estadisticas de Número de habitaciones por host
+
+```{r}
+paste("La media de habitaciones en alquier por host es", round(mean(df$Rooms.rent.by.the.host),digits = 3))
+paste("La media de habitaciones en alquier por host es, truncando al 0.2 es", round(mean(df$Rooms.rent.by.the.host, trim = 0.2), digits = 3))
+paste("La mediana de habitaciones en alquier por host es:", median(df$Rooms.rent.by.the.host))
+
+paste("La desviacion tipica de habitaciones en alquier por host es:", sd(df$Rooms.rent.by.the.host))
+paste("La varianza del número de habitaciones por host es:", round(var(df$Rooms.rent.by.the.host), digits = 3))
+paste("El número de habitaciones por host mínimo es:", min(df$Rooms.rent.by.the.host))
+paste("El número de habitaciones por host máximo es:", max(df$Rooms.rent.by.the.host))
+
+
+#Outliers
+X <- df$Rooms.rent.by.the.host
+#boxplot(X)
+boxplot(X, ylim = c(0,30))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+
+#eliminar los outliers, considerando que son los que tienen un número de reseñas mensuales superior a Q3+1,5*IQR
+
+Q3_habitaciones <- quantile(df$Rooms.rent.by.the.host, 0.75, na.rm = TRUE)
+IQR_habitaciones <- IQR(df$Rooms.rent.by.the.host, na.rm = TRUE)
+umbral_superior_habitaciones <- Q3_habitaciones + 1.5 * IQR_habitaciones
+df_sin_outliers_habitaciones <- df %>% filter(Rooms.rent.by.the.host <= umbral_superior_habitaciones)
+
+X <- df_sin_outliers_habitaciones$Rooms.rent.by.the.host
+#boxplot(X)
+boxplot(X, ylim = c(0,10))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+```
+
+#### Estadisticas de Disponibilidad
+
+```{r}
+paste("La media de disponibilidad es", round(mean(df$Availibility),digits = 3))
+paste("La media de disponibilidad es, truncando al 0.2 es", round(mean(df$Availibility, trim = 0.2), digits = 3))
+paste("La mediana de disponibilidad es:", median(df$Availibility))
+
+paste("La desviacion tipica de disponibilidad es:", sd(df$Availibility))
+paste("La varianza de la disponibilidad es:", round(var(df$Availibility), digits = 3))
+paste("El número de días disponibles mínimo es:", min(df$Availibility))
+paste("El número de días disponibles máximo es:", max(df$Availibility))
+
+
+#Outliers
+X <- df$Availibility
+boxplot(X)
+#boxplot(X, ylim = c(0,20))
+grid()
+q1<-quantile(X,0.25)
+q3<-quantile(X,0.75)
+iqr<-q3-q1
+names(iqr)<-"iqr"
+
+paste("Cuartil 1: 25% ->", q1)
+paste("Cuartil 3: 75% ->", q3)
+paste("iqr: q3-q1 ->", iqr)
+
+
+text(1.25,q3,"Q3")
+text(1.29,median(X),"mediana")
+text(1.25,q1,"Q1")
+text(1.25,q3+1.5*iqr,"Q3+1.5·IQR")
+text(1.25,q1-1.5*iqr,"Q1-1.5·IQR")
+
+text(0.9,q3+1.8*iqr,"Outliers")
+
+#no hay outliers
+```
+
+#### Distribución del tipo de habitación y cuantos casos tenemos de cada barrio
+
+```{r}
+#cuántos casos hay de cada tipo de habitación
+
+table(df$Room.type, useNA = "ifany")
+```
+
+```{r}
+#cuántos casos hay de cada barrio
+
+table(df$Neighbourhood, useNA = "ifany")
+
+```
+
+## Paso 4: Graficas
+
+#### Histograma de precios
+
+```{r}
+ggplot(df, aes(x = df$Room.Price)) +   geom_histogram(binwidth = 10, fill = "blue", color = "black") +   labs(title = "Distribución de los precios de los alojamientos en Madrid", x = "Precio", y = "Frecuencia") +   theme_minimal()
+
+#para que el histograma se vea mejor y tenga sentido, quitamos tanto los que tienen precio 0 como los outliers
+
+ggplot(df_sin_outliers_precio, aes(x = df_sin_outliers_precio$Room.Price)) +   geom_histogram(binwidth = 10, fill = "blue", color = "black") +   labs(title = "Distribución de los precios de los alojamientos en Madrid (sin outliers)", x = "Precio", y = "Frecuencia") +   theme_minimal() 
+```
+
+Parece que a medida que va aumentando el precio, disminuye el número de habitaciones que hay, la mayoría se concentran en los primeros tramos de precios.
+
+#### Precio en funcion de barrio
+
+```{r}
+library(ggplot2)
+
+#creamos otro data frame con el precio medio por barrio
+
+df_mean_price <- df_sin_outliers_precio %>% group_by(Neighbourhood) %>% summarise(mean_price = mean(Room.Price, na.rm = TRUE)) %>% left_join(select(df_sin_outliers_precio, Room.ID, Host.ID, Neighbourhood, Room.type, Minimum.nights, Number.of.reviews, Date.last.review, Number.of.reviews.per.month, Rooms.rent.by.the.host, Availibility, Longitud, Latitud, Distancia), by = "Neighbourhood")
+
+#dibujamos un gráfico de barras con los datos totales
+
+ggplot(df, aes(x= Room.Price, y= Neighbourhood))+geom_col()+xlab("Precio")+
+ylab("Barrio")+ggtitle("Comparación de barrios por precio")+ theme(axis.text.x = element_text(angle = 90))
+
+#sin 0 y outliers del precio
+
+ggplot(df_sin_outliers_precio, aes(x= Room.Price, y= Neighbourhood))+geom_col()+xlab("Precio")+ ylab("Barrio")+ggtitle("Comparación de barrios por precio")+ theme(axis.text.x = element_text(angle = 90))
+
+#con el precio medio, aunque se ve igual de mal
+ggplot(df_mean_price, aes(x= mean_price, y= Neighbourhood)) + geom_col() + xlab("Precio Medio")+ ylab("Barrio")+ggtitle("Comparación de barrios por precio medio") + theme(axis.text.x = element_text(angle = 90))
+
+#boxplot que muestra la distribución de precios por barrio, ordenándolos por la mediana de los precios de las habitaciones
+
+ggplot(df_sin_outliers_precio, aes(x = reorder(Neighbourhood, Room.Price, median), y = Room.Price)) + geom_boxplot(fill = "lightblue", color = "black") + labs(title = "Distribución de Precios por Vecindario", x = "Vecindario", y = "Precio") + theme_minimal() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+#boxplot que muestra la distribución de precios por barrio, ordenándolos por la distancia al centro (Sol)
+
+ggplot(df_sin_outliers_precio, aes(x = reorder(Neighbourhood, Distancia), y = Room.Price)) + geom_boxplot(fill = "lightblue", color = "black") + labs(title = "Distribución de Precios por Vecindario", x = "Vecindario", y = "Precio") + theme_minimal() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+Estos gráficos de arriba son un poco locura, por lo que se vería mejor representado en un mapa:
+
+```{r}
+ggplot(df, aes(x = Longitud, y = Latitud, color = Room.Price)) + geom_point(alpha = 0.7) + scale_color_gradient(low = "yellow", high = "red") + labs(title = "Mapa de Precios de alojamientos en Madrid", x = "Longitud", y = "Latitud", color = "Precio Medio") + theme_minimal()
+
+#para que el mapa se vea mejor y tenga sentido, quitamos tanto los que tienen precio 0 y los outliers
+
+ggplot(df_sin_outliers_precio, aes(x = Longitud, y = Latitud, color = Room.Price)) + geom_point(alpha = 0.7) + scale_color_gradient(low = "yellow", high = "red") + labs(title = "Mapa de Precios de alojamientos en Madrid", x = "Longitud", y = "Latitud", color = "Precio Medio") + theme_minimal()
+
+#replicamos el mapa con la media del precio por barrio
+
+ggplot(df_mean_price, aes(x = Longitud, y = Latitud, color = mean_price)) + geom_point(alpha = 0.7) + scale_color_gradient(low = "yellow", high = "red") + labs(title = "Mapa de Precios de habitaciones en Madrid (Media por Barrio)", x = "Longitud", y = "Latitud", color = "Precio Medio") + theme_minimal()
+
+
+```
+
+Parece que el precio medio de las habitaciones en madrid es mayor cuanto más cerca del centro están.
+
+#### Precio en función del tipo de alojamiento
+
+```{r}
+ggplot(df_sin_outliers_precio, aes(x = Room.type, y = Room.Price)) + geom_boxplot() + labs(title = "Variación de precio por tipo de alojamiento", x = "Tipo de alojamiento", y = "Precio")
+
+ggplot(df_sin_outliers_precio, aes(x = Room.type, y = Room.Price)) + stat_summary(fun = "mean", geom = "bar") + labs(title = "Precio promedio por tipo de alojamiento", x = "Tipo de alojoamiento", y = "Precio promedio")
+
+ggplot(df_sin_outliers_precio, aes(x = Room.type, y = Room.Price)) + geom_jitter() + labs(title = "Variación de precio por tipo dealojamiento", x = "Tipo de alojamiento", y = "Precio")
+```
+
+En general, los precios de casas/ apartamentos y habitaciones de hotel son más elevados, además de ser más reducidos para las habitaciones compartidas, estando en medio las habitaciones privadas.
+
+#### Precio en función del mínimo número de noches
+
+```{r}
+ggplot(df_sin_outliers_precio, aes(x = Minimum.nights, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Variación de precio del alojamiento en función del mínimo de noches",
+       x = "Mínimo de noches",
+       y = "Precio")
+
+ggplot(df_sin_outliers_precio, aes(x = Minimum.nights, y = Room.Price)) +
+  geom_line() +
+  labs(title = "Variación de precio del alojamiento en función del mínimo de noches",
+       x = "Mínimo de noches",
+       y = "Precio")
+
+ggplot(df_sin_outliers_precio, aes(x = factor(Minimum.nights), y = Room.Price)) +
+  geom_boxplot() +
+  labs(title = "Variación de precio del alojamiento en función del mínimo de noches",
+       x = "Mínimo de noches",
+       y = "Precio")
+
+#sin outliers del número mínimo de noches
+
+ggplot(df_sin_outliers_nochesminimas, aes(x = Minimum.nights, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Variación de precio del alojamiento en función del mínimo de noches",
+       x = "Mínimo de noches",
+       y = "Precio")
+
+ggplot(df_sin_outliers_nochesminimas, aes(x = Minimum.nights, y = Room.Price)) +
+  geom_line() +
+  labs(title = "Variación de precio del alojamiento en función del mínimo de noches",
+       x = "Mínimo de noches",
+       y = "Precio")
+
+ggplot(df_sin_outliers_nochesminimas, aes(x = factor(Minimum.nights), y = Room.Price)) +
+  geom_boxplot() +
+  labs(title = "Variación de precio del alojamiento en función del mínimo de noches",
+       x = "Mínimo de noches",
+       y = "Precio")
+
+#sin outliers del número mínimo de noches y del precio
+
+df_sin_outliers_precioynoches <- df %>% filter(Room.Price > 0 & Room.Price <= umbral_superior_precio & Minimum.nights <= umbral_superior_nochesminimas)
+
+ggplot(df_sin_outliers_precioynoches, aes(x = Minimum.nights, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Variación de precio del alojamiento en función del mínimo de noches",
+       x = "Mínimo de noches",
+       y = "Precio")
+
+ggplot(df_sin_outliers_precioynoches, aes(x = Minimum.nights, y = Room.Price)) +
+  geom_line() +
+  labs(title = "Variación de precio del alojamiento en función del mínimo de noches",
+       x = "Mínimo de noches",
+       y = "Precio")
+
+ggplot(df_sin_outliers_precioynoches, aes(x = factor(Minimum.nights), y = Room.Price)) +
+  geom_boxplot() +
+  labs(title = "Variación de precio del alojamiento en función del mínimo de noches",
+       x = "Mínimo de noches",
+       y = "Precio")
+
+
+```
+
+Aparentemente, no hay relación entre el precio y el número mínimo de noches, aunque a grandes rasgos, los que piden un número mínimo de noches muy elevado no alcanzan precios tan altos. Solo si nos fijamos sin outliers del mínimo número de noches, se aprecia mejor la relación y cuantas más noches se piden como mínimo, los precios suben menos.
+
+#### Precio en función del número de reseñas
+
+```{r}
+ggplot(df_sin_outliers_precio, aes(x= Number.of.reviews, y= Room.Price))+geom_line()+
+  labs(title = "Precio del alojamiento en función del número de reseñas",
+       x = "Número de reseñas",
+       y = "Precio")+ theme(axis.text.x = element_text(angle = 90))
+
+ggplot(df_sin_outliers_precio, aes(x = Number.of.reviews, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Precio del alojamiento en función del número de reseñas",
+       x = "Número de reseñas",
+       y = "Precio")
+
+#sin outliers del número de reseñas
+
+ggplot(df_sin_outliers_reseñas, aes(x= Number.of.reviews, y= Room.Price))+geom_line()+
+  labs(title = "Precio del alojamiento en función del número de reseñas",
+       x = "Número de reseñas",
+       y = "Precio")+ theme(axis.text.x = element_text(angle = 90))
+
+ggplot(df_sin_outliers_reseñas, aes(x = Number.of.reviews, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Precio del alojamiento en función del número de reseñas",
+       x = "Número de reseñas",
+       y = "Precio")
+
+#sin outliers precio y número de reseñas
+
+df_sin_outliers_precioyreseñas <- df %>% filter(Room.Price > 0 & Room.Price <= umbral_superior_precio & Number.of.reviews <= umbral_superior_reseñas)
+
+ggplot(df_sin_outliers_precioyreseñas, aes(x= Number.of.reviews, y= Room.Price))+geom_line()+
+  labs(title = "Precio del alojamiento en función del número de reseñas",
+       x = "Número de reseñas",
+       y = "Precio")+ theme(axis.text.x = element_text(angle = 90))
+
+ggplot(df_sin_outliers_precioyreseñas, aes(x = Number.of.reviews, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Precio del alojamiento en función del número de reseñas",
+       x = "Número de reseñas",
+       y = "Precio")
+```
+
+Aparentemente, no hay relación entre el precio y el número de reseñas, aunque a grandes rasgos, los que tienen muchas más reseñas, no alcanzan precios tan altos.
+
+El número de reseñas mensuales, no se ha utilizado aquí, ya que resultan los mismos resultados dado que es una variable generada a partir de esta:
+
+```{r}
+ggplot(df_sin_outliers_precio, aes(x= Number.of.reviews.per.month, y= Room.Price))+geom_line()+
+  labs(title = "Precio del alojamiento en función del número de reseñas mensuales",
+       x = "Número de reseñas mensuales",
+       y = "Precio")+ theme(axis.text.x = element_text(angle = 90))
+
+ggplot(df_sin_outliers_precio, aes(x = Number.of.reviews.per.month, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Precio del alojamiento en función del número de reseñas mensuales",
+       x = "Número de reseñas mensuales",
+       y = "Precio")
+
+#sin outliers del número de reseñas mensuales
+
+ggplot(df_sin_outliers_reseñasmes, aes(x= Number.of.reviews.per.month, y= Room.Price))+geom_line()+
+  labs(title = "Precio del alojamiento en función del número de reseñas mensuales",
+       x = "Número de reseñas mensuales",
+       y = "Precio")+ theme(axis.text.x = element_text(angle = 90))
+
+ggplot(df_sin_outliers_reseñasmes, aes(x = Number.of.reviews.per.month, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Precio del alojamiento en función del número de reseñas mensuales",
+       x = "Número de reseñas mensuales",
+       y = "Precio")
+
+#sin outliers precio y número de reseñas
+
+df_sin_outliers_precioyreseñasmes <- df %>% filter(Room.Price > 0 & Room.Price <= umbral_superior_precio & Number.of.reviews.per.month <= umbral_superior_reseñasmes)
+
+ggplot(df_sin_outliers_precioyreseñasmes, aes(x= Number.of.reviews.per.month, y= Room.Price))+geom_line()+
+  labs(title = "Precio del alojamiento en función del número de reseñas mensuales",
+       x = "Número de reseñas mensuales",
+       y = "Precio")+ theme(axis.text.x = element_text(angle = 90))
+
+ggplot(df_sin_outliers_precioyreseñasmes, aes(x = Number.of.reviews.per.month, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Precio del alojamiento en función del número de reseñas mensuales",
+       x = "Número de reseñas mensuales",
+       y = "Precio")
+```
+
+#### Precio en función de la fecha de la última reseña
+
+```{r}
+ggplot(df_sin_outliers_precio, aes(x = Date.last.review, y = Room.Price)) +
+  geom_line() +
+  labs(title = "Variación del precio del alojamiento en función de la fecha de la última revisión",
+       x = "Fecha de la última revisión",
+       y = "Precio")
+
+ggplot(df_sin_outliers_precio, aes(x = Date.last.review, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Variación del precio del alojamiento en función de la fecha de la última reseña",
+       x = "Fecha de la última reseña",
+       y = "Precio")
+```
+
+Aparentemente, no hay relación entre el precio y la fecha de la última reseña.
+
+#### Precio en función del número de habitaciones alquiladas por el anfitrión
+
+```{r}
+ggplot(df_sin_outliers_precio, aes(x = Rooms.rent.by.the.host, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Variación del precio del alojamiento en función del número de alojamientos alquilados por el anfitrión",
+       x = "Alojamientos alquilados por el anfitrión",
+       y = "Precio")
+
+#sin outliers del número de habitaciones alquiladas por el anfitrión
+
+ggplot(df_sin_outliers_habitaciones, aes(x = Rooms.rent.by.the.host, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Variación del precio del alojamiento en función del número de alojamientos alquilados por el anfitrión",
+       x = "Alojamientos alquilados por el anfitrión",
+       y = "Precio")
+
+#sin outliers del número de habitaciones alquiladas por el anfitrión y del precio
+
+df_sin_outliers_precioyhabitaciones <- df %>% filter(Room.Price > 0 & Room.Price <= umbral_superior_precio & Rooms.rent.by.the.host <= umbral_superior_habitaciones)
+
+ggplot(df_sin_outliers_precioyhabitaciones, aes(x = Rooms.rent.by.the.host, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Variación del precio del alojamiento en función del número de alojamientos alquilados por el anfitrión",
+       x = "Alojamientos alquilados por el anfitrión",
+       y = "Precio")
+
+```
+
+Aparentemente, no hay relación entre el precio y el número de alojamientos alquilados por un mismo anfitrión.
+
+#### Precio en función de la disponibilidad del alojamiento
+
+```{r}
+ggplot(df_sin_outliers_precio, aes(x = Availibility, y = Room.Price)) +
+  geom_point() +
+  labs(title = "Variación del precio del alojamiento en función de la disponibilidad",
+       x = "Disponibilidad",
+       y = "Precio")
+
+ggplot(df_sin_outliers_precio, aes(x = Availibility, y = Room.Price)) +
+  geom_smooth() +
+  labs(title = "Variación del precio del alojamiento en función de la disponibilidad",
+       x = "Disponibilidad",
+       y = "Precio")
+```
+
+Cuando el precio de la habitación es bajo, la disponibilidad también lo es. Después, a medida que aumenta el precio, también lo hace la disponibilidad hasta llegar a un punto donde ambas vuelven a caer y esta tendencia se vuelve a repetir.
+
+#### Precio en función de la distancia al centro de la ciudad
+
+```{r}
+ggplot(df_sin_outliers_precio, aes(x= Room.Price, y= Distancia))+geom_line()+
+ylab("Distancia [km]")+ggtitle("Comparación de distancia y precio")+ theme(axis.text.x = element_text(angle = 90))
+
+ggplot(df_sin_outliers_precio, aes(x = Room.Price, y = Distancia)) + geom_point() + labs(x = "Precio", y = "Distancia al centro de la ciudad") + ggtitle("Relación entre el precio del alojamiento y Distancia al Centro de Madrid") + theme_minimal()
+
+ggplot(df_sin_outliers_precio, aes(x = Distancia, y = Room.Price)) + geom_point(alpha = 0.5) + geom_smooth(method = "lm", formula='y~x', color = "blue") + labs(title = "Precio vs. Distancia al Centro de Madrid", x = "Distancia al Centro (km)", y = "Precio") + theme_minimal()
+
+ggplot(df_sin_outliers_precio, aes(x = Distancia, y = Room.Price)) +
+  geom_density_2d() +
+  labs(title = "Densidad de precio en función de la distancia",
+       x = "Distancia al centro de la ciudad (km)",
+       y = "Precio")
+```
+
+Los alojamientos más céntricos pueden llegar a alcanzar precios muy altos, pero si aumentamos la distancia al centro, en general, cae el precio.
+
+## Paso 4: Modelo Predictivo
+
+```{r}
+#Por facilidad de desarrollo, hago una copia del df y así no tengo que volver a correr la carga de datos cuando quiero volver a probar líneas de código.
+df2 <- df
+```
+
+#### Feature Engineering & Conversión de Variables Categóricas
+
+```{r}
+# Convierto 'Date.last.review' en formato fecha, por si no lo estaba.
+df2$Date.last.review <- as.Date(df2$Date.last.review, format = "%Y-%m-%d")
+# Calculo el número de días desde la última review para que sea un input digerible para el modelo
+df2$Days.since.last.review <- as.numeric(Sys.Date() - df2$Date.last.review)
+
+# Convierto variables categóricas en factores también para que el modelo pueda digerirlo.
+df2$Neighbourhood <- as.factor(df2$Neighbourhood)
+df2$Room.type <- as.factor(df2$Room.type)
+
+```
+
+#### Heatmap
+
+```{r}
+# Selecciono las columnas numéricas
+numeric_cols <- sapply(df2, is.numeric)
+numeric_data <- df2[, numeric_cols]
+
+# Calculo correlation matrix
+cor_matrix <- cor(numeric_data, use = "complete.obs")
+print(cor_matrix)
+melted_cor_matrix <- melt(cor_matrix)
+
+# Heatmap con ggplot2
+ggplot(data = melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1)) +
+  coord_fixed()
+
+```
+
+#### Scatterplot: Eliminando Outliers
+
+```{r}
+# Scatterplot para ver los outliers y la relación entre el precio y las variables que a priori creo que están más relacionados con el precio
+par(mfrow=c(1, 3))  # 3 Gráficas juntas
+plot(df2$Distancia, df2$Room.Price, main="Room.Price vs Distancia", xlab="Distancia", ylab="Room.Price")
+plot(df2$Number.of.reviews, df2$Room.Price, main="Room.Price vs Number of Reviews", xlab="Number of Reviews", ylab="Room.Price")
+plot(df2$Availibility, df2$Room.Price, main="Room.Price vs Availibility", xlab="Availibility", ylab="Room.Price")
+par(mfrow=c(1, 1))  
+
+```
+
+```{r}
+# Eliminar columnas innecesarias (latitud y longitud ya están integradas en distancia, nº de reviews al mes está correlacionada con nº )
+df2 <- df2 %>% select(-Latitud, -Longitud, -Room.ID, -Host.ID, -Number.of.reviews.per.month, -Date.last.review)
+df2
+```
+
+```{r}
+#Eliminación de outliers
+# Calculate IQR for Room.Price
+Q1 <- quantile(df2$Room.Price, 0.25)
+Q3 <- quantile(df2$Room.Price, 0.75)
+IQR <- Q3 - Q1
+
+# Outlier thresholds
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+# Identificar outliers
+outliers <- df2[df2$Room.Price < lower_bound | df2$Room.Price > upper_bound, ]
+print(nrow(outliers))  # Number of outliers
+
+# Eliminar outliers
+df_cleaned <- df2[!(df2$Room.Price < lower_bound | df2$Room.Price > upper_bound), ]
+
+```
+
+```{r}
+# Scatterplots
+par(mfrow=c(1, 3))  # Multiple plots in one figure
+plot(df_cleaned$Distancia, df_cleaned$Room.Price, main="Room.Price vs Distancia", xlab="Distancia", ylab="Room.Price")
+plot(df_cleaned$Number.of.reviews, df_cleaned$Room.Price, main="Room.Price vs Number of Reviews", xlab="Number of Reviews", ylab="Room.Price")
+plot(df_cleaned$Availibility, df_cleaned$Room.Price, main="Room.Price vs Availibility", xlab="Availibility", ylab="Room.Price")
+par(mfrow=c(1, 1))  # Reset plot layout
+```
+
+#### Train/Test Split
+
+```{r}
+# training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(df_cleaned$Room.Price, p = 0.8, list = FALSE)
+trainData <- df_cleaned[trainIndex, ]
+testData <- df_cleaned[-trainIndex, ]
+
+```
+
+#### Modelo 1: Sin normalizacion
+
+```{r}
+# Linear regression model 
+model <- lm(Room.Price ~ Room.type + Neighbourhood + Distancia + Number.of.reviews + Availibility + Minimum.nights + Rooms.rent.by.the.host, data = trainData)
+
+# Summary del modelo model
+median_price <- median(trainData$Room.Price)
+avg_price <- mean(trainData$Room.Price)
+cat("Median Room.Price: ", median_price, "  ")
+cat("Mean Room.Price: ", avg_price)
+
+print(summary(model))
+
+# Predicciones en el test set
+predictions <- predict(model, newdata = testData)
+
+# Performance metrics
+RMSE <- sqrt(mean((predictions - testData$Room.Price)^2))
+MAE <- mean(abs(predictions - testData$Room.Price))
+R2 <- cor(predictions, testData$Room.Price)^2
+
+# Print performance metrics
+cat("RMSE: ", RMSE, "\n")
+cat("MAE: ", MAE, "\n")
+cat("R²: ", R2, "\n")
+```
+
+```{r}
+# Calculate mean and median of Room.Price
+mean_price <- mean(df$Room.Price)
+cat("Mean Room.Price: ", mean_price, "\n")
+
+# Compare RMSE to the mean and median
+cat("RMSE as a percentage of Mean Room.Price: ", (RMSE / mean_price) * 100, "%\n")
+
+```
+
+#### Modelo 2: Normalizando los dependant variables.
+
+```{r}
+# Numeric columns menos la target variable
+numeric_cols <- sapply(df_cleaned, is.numeric) & colnames(df_cleaned) != "Room.Price"
+
+# Normalize numeric feature columns
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+normalized_features <- as.data.frame(lapply(df_cleaned[, numeric_cols], normalize))
+
+# Combinar normalized features con non-numeric features y la target variable
+non_numeric_features <- df_cleaned[, !numeric_cols, drop = FALSE]
+df_cleaned_normalized <- cbind(normalized_features, non_numeric_features, Room.Price = df_cleaned$Room.Price)
+```
+
+```{r}
+# training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(df_cleaned_normalized$Room.Price, p = 0.8, list = FALSE)
+trainData2 <- df_cleaned_normalized[trainIndex, ]
+testData2 <- df_cleaned_normalized[-trainIndex, ]
+```
+
+```{r}
+# linear regression model
+model <- lm(Room.Price ~ Room.type + Neighbourhood + Distancia + Number.of.reviews + Availibility, data = trainData2)
+
+# Summary of the model
+median_price <- median(trainData2$Room.Price)
+avg_price <- mean(trainData2$Room.Price)
+cat("Median Room.Price: ", median_price, "  ")
+cat("Mean Room.Price: ", avg_price)
+
+print(summary(model))
+
+# Make predictions on the test set
+predictions <- predict(model, newdata = testData2)
+
+# Calculate performance metrics
+RMSE <- sqrt(mean((predictions - testData2$Room.Price)^2))
+MAE <- mean(abs(predictions - testData2$Room.Price))
+R2 <- cor(predictions, testData2$Room.Price)^2
+
+# Print performance metrics
+cat("RMSE: ", RMSE, "\n")
+cat("MAE: ", MAE, "\n")
+cat("R²: ", R2, "\n")
+```
+
+## Paso 5: Conclusiones
+
+Añadidas en el informe
